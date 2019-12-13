@@ -119,15 +119,14 @@ svr.Get("/stream", [&](const Request &req, Response &res) {
 svr.Post("/content_receiver",
   [&](const Request &req, Response &res, const ContentReader &content_reader) {
     if (req.is_multipart_form_data()) {
-      MultipartFiles files;
+      MultipartFormDataItems files;
       content_reader(
-        [&](const std::string &name, const MultipartFile &file) {
-          files.emplace(name, file);
+        [&](const MultipartFormData &file) {
+          files.push_back(file);
           return true;
         },
-        [&](const std::string &name, const char *data, size_t data_length) {
-          auto &file = files.find(name)->second;
-          file.content.append(data, data_length);
+        [&](const char *data, size_t data_length) {
+          files.back().content.append(data, data_length);
           return true;
         });
     } else {
@@ -324,16 +323,23 @@ std::shared_ptr<httplib::Response> res =
 
 This feature was contributed by [underscorediscovery](https://github.com/yhirose/cpp-httplib/pull/23).
 
-### Basic Authentication
+### Authentication
+
+NOTE: OpenSSL is required for Digest Authentication, since cpp-httplib uses message digest functions in OpenSSL.
 
 ```cpp
 httplib::Client cli("httplib.org");
+cli.set_auth("user", "pass");
 
-auto res = cli.Get("/basic-auth/hello/world", {
-  httplib::make_basic_authentication_header("hello", "world")
-});
+// Basic
+auto res = cli.Get("/basic-auth/user/pass");
 // res->status should be 200
-// res->body should be "{\n  \"authenticated\": true, \n  \"user\": \"hello\"\n}\n".
+// res->body should be "{\n  \"authenticated\": true, \n  \"user\": \"user\"\n}\n".
+
+// Digest
+res = cli.Get("/digest-auth/auth/user/pass/SHA-256");
+// res->status should be 200
+// res->body should be "{\n  \"authenticated\": true, \n  \"user\": \"user\"\n}\n".
 ```
 
 ### Range
@@ -381,7 +387,7 @@ httplib::Client cli("yahoo.com");
 auto res = cli.Get("/");
 res->status; // 301
 
-cli.follow_location(true);
+cli.set_follow_location(true);
 res = cli.Get("/");
 res->status; // 200
 ```
@@ -416,6 +422,13 @@ The server applies gzip compression to the following MIME type contents:
   * application/json
   * application/xml
   * application/xhtml+xml
+
+### Compress content on client
+
+```c++
+cli.set_compress(true);
+res = cli.Post("/resource/foo", "...", "text/plain");
+```
 
 NOTE
 ----

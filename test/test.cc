@@ -30,9 +30,11 @@ const std::string JSON_DATA = "{\"hello\":\"world\"}";
 
 const string LARGE_DATA = string(1024 * 1024 * 100, '@'); // 100MB
 
-MultipartFile& get_file_value(MultipartFiles &files, const char *key) {
-  auto it = files.find(key);
-  if (it != files.end()) { return it->second; }
+MultipartFormData& get_file_value(MultipartFormDataItems &files, const char *key) {
+  auto it = std::find_if(files.begin(), files.end(), [&](const MultipartFormData &file) {
+    return file.name == key;
+  });
+  if (it != files.end()) { return *it; }
   throw std::runtime_error("invalid mulitpart form data name error");
 }
 
@@ -469,7 +471,49 @@ TEST(BaseAuthTest, FromHTTPWatch) {
               "{\n  \"authenticated\": true, \n  \"user\": \"hello\"\n}\n");
     EXPECT_EQ(200, res->status);
   }
+
+  {
+    cli.set_auth("hello", "world");
+    auto res = cli.Get("/basic-auth/hello/world");
+    ASSERT_TRUE(res != nullptr);
+    EXPECT_EQ(res->body,
+              "{\n  \"authenticated\": true, \n  \"user\": \"hello\"\n}\n");
+    EXPECT_EQ(200, res->status);
+  }
 }
+
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+TEST(DigestAuthTest, FromHTTPWatch) {
+  auto host = "httpbin.org";
+  auto port = 443;
+  httplib::SSLClient cli(host, port);
+
+  {
+    auto res = cli.Get("/digest-auth/auth/hello/world");
+    ASSERT_TRUE(res != nullptr);
+    EXPECT_EQ(401, res->status);
+  }
+
+  {
+    std::vector<std::string> paths = {
+      "/digest-auth/auth/hello/world/MD5",
+      "/digest-auth/auth/hello/world/SHA-256",
+      "/digest-auth/auth/hello/world/SHA-512",
+      "/digest-auth/auth-init/hello/world/MD5",
+      "/digest-auth/auth-int/hello/world/MD5",
+    };
+
+    cli.set_auth("hello", "world");
+    for (auto path: paths) {
+      auto res = cli.Get(path.c_str());
+      ASSERT_TRUE(res != nullptr);
+      EXPECT_EQ(res->body,
+                "{\n  \"authenticated\": true, \n  \"user\": \"hello\"\n}\n");
+      EXPECT_EQ(200, res->status);
+    }
+  }
+}
+#endif
 
 TEST(AbsoluteRedirectTest, Redirect) {
   auto host = "httpbin.org";
@@ -480,7 +524,7 @@ TEST(AbsoluteRedirectTest, Redirect) {
   httplib::Client cli(host);
 #endif
 
-  cli.follow_location(true);
+  cli.set_follow_location(true);
   auto res = cli.Get("/absolute-redirect/3");
   ASSERT_TRUE(res != nullptr);
   EXPECT_EQ(200, res->status);
@@ -495,7 +539,7 @@ TEST(RedirectTest, Redirect) {
   httplib::Client cli(host);
 #endif
 
-  cli.follow_location(true);
+  cli.set_follow_location(true);
   auto res = cli.Get("/redirect/3");
   ASSERT_TRUE(res != nullptr);
   EXPECT_EQ(200, res->status);
@@ -510,7 +554,7 @@ TEST(RelativeRedirectTest, Redirect) {
   httplib::Client cli(host);
 #endif
 
-  cli.follow_location(true);
+  cli.set_follow_location(true);
   auto res = cli.Get("/relative-redirect/3");
   ASSERT_TRUE(res != nullptr);
   EXPECT_EQ(200, res->status);
@@ -525,7 +569,7 @@ TEST(TooManyRedirectTest, Redirect) {
   httplib::Client cli(host);
 #endif
 
-  cli.follow_location(true);
+  cli.set_follow_location(true);
   auto res = cli.Get("/redirect/21");
   ASSERT_TRUE(res == nullptr);
 }
@@ -538,7 +582,7 @@ TEST(YahooRedirectTest, Redirect) {
   ASSERT_TRUE(res != nullptr);
   EXPECT_EQ(301, res->status);
 
-  cli.follow_location(true);
+  cli.set_follow_location(true);
   res = cli.Get("/");
   ASSERT_TRUE(res != nullptr);
   EXPECT_EQ(200, res->status);
@@ -546,7 +590,7 @@ TEST(YahooRedirectTest, Redirect) {
 
 TEST(HttpsToHttpRedirectTest, Redirect) {
   httplib::SSLClient cli("httpbin.org");
-  cli.follow_location(true);
+  cli.set_follow_location(true);
   auto res =
       cli.Get("/redirect-to?url=http%3A%2F%2Fwww.google.com&status_code=302");
   ASSERT_TRUE(res != nullptr);
@@ -759,15 +803,14 @@ protected:
         .Post("/content_receiver",
               [&](const Request & req, Response &res, const ContentReader &content_reader) {
                 if (req.is_multipart_form_data()) {
-                  MultipartFiles files;
+                  MultipartFormDataItems files;
                   content_reader(
-                    [&](const std::string &name, const MultipartFile &file) {
-                      files.emplace(name, file);
+                    [&](const MultipartFormData &file) {
+                      files.push_back(file);
                       return true;
                     },
-                    [&](const std::string &name, const char *data, size_t data_length) {
-                      auto &file = files.find(name)->second;
-                      file.content.append(data, data_length);
+                    [&](const char *data, size_t data_length) {
+                      files.back().content.append(data, data_length);
                       return true;
                     });
 
@@ -1357,7 +1400,7 @@ TEST_F(ServerTest, GetStreamedWithRangeMultipart) {
 }
 
 TEST_F(ServerTest, GetStreamedEndless) {
-  size_t offset = 0;
+  uint64_t offset = 0;
   auto res = cli_.Get("/streamed-cancel",
                       [&](const char * /*data*/, uint64_t data_length) {
                         if (offset < 100) {
@@ -1492,12 +1535,13 @@ TEST_F(ServerTest, PutWithContentProvider) {
 
 #ifdef CPPHTTPLIB_ZLIB_SUPPORT
 TEST_F(ServerTest, PutWithContentProviderWithGzip) {
+  cli_.set_compress(true);
   auto res = cli_.Put(
       "/put", 3,
       [](size_t /*offset*/, size_t /*length*/, DataSink sink) {
         sink("PUT", 3);
       },
-      "text/plain", true);
+      "text/plain");
 
   ASSERT_TRUE(res != nullptr);
   EXPECT_EQ(200, res->status);
@@ -1505,7 +1549,8 @@ TEST_F(ServerTest, PutWithContentProviderWithGzip) {
 }
 
 TEST_F(ServerTest, PutLargeFileWithGzip) {
-  auto res = cli_.Put("/put-large", LARGE_DATA, "text/plain", true);
+  cli_.set_compress(true);
+  auto res = cli_.Put("/put-large", LARGE_DATA, "text/plain");
 
   ASSERT_TRUE(res != nullptr);
   EXPECT_EQ(200, res->status);
@@ -1578,7 +1623,8 @@ TEST_F(ServerTest, PostMulitpartFilsContentReceiver) {
 }
 
 TEST_F(ServerTest, PostContentReceiverGzip) {
-  auto res = cli_.Post("/content_receiver", "content", "text/plain", true);
+  cli_.set_compress(true);
+  auto res = cli_.Post("/content_receiver", "content", "text/plain");
   ASSERT_TRUE(res != nullptr);
   ASSERT_EQ(200, res->status);
   ASSERT_EQ("content", res->body);
@@ -1759,12 +1805,96 @@ TEST_F(ServerTest, MultipartFormDataGzip) {
       {"key2", "--abcdefg123", "", ""},
   };
 
-  auto res = cli_.Post("/gzipmultipart", items, true);
+  cli_.set_compress(true);
+  auto res = cli_.Post("/gzipmultipart", items);
 
   ASSERT_TRUE(res != nullptr);
   EXPECT_EQ(200, res->status);
 }
 #endif
+
+// Sends a raw request to a server listening at HOST:PORT.
+static bool send_request(time_t read_timeout_sec, const std::string& req) {
+  auto client_sock =
+      detail::create_client_socket(HOST, PORT, /*timeout_sec=*/5);
+
+  if (client_sock == INVALID_SOCKET) { return false; }
+
+  return detail::process_and_close_socket(
+      true, client_sock, 1, read_timeout_sec, 0,
+      [&](Stream& strm, bool /*last_connection*/,
+          bool &/*connection_close*/) -> bool {
+        if (req.size() !=
+            static_cast<size_t>(strm.write(req.data(), req.size()))) {
+          return false;
+        }
+
+        char buf[512];
+
+        detail::stream_line_reader line_reader(strm, buf, sizeof(buf));
+        while (line_reader.getline()) {}
+        return true;
+      });
+}
+
+TEST(ServerRequestParsingTest, TrimWhitespaceFromHeaderValues) {
+  Server svr;
+  std::string header_value;
+  svr.Get("/validate-ws-in-headers",
+          [&](const Request &req, Response &res) {
+            header_value = req.get_header_value("foo");
+            res.set_content("ok", "text/plain");
+          });
+
+  thread t = thread([&] { svr.listen(HOST, PORT); });
+  while (!svr.is_running()) {
+    msleep(1);
+  }
+
+  // Only space and horizontal tab are whitespace. Make sure other whitespace-
+  // like characters are not treated the same - use vertical tab and escape.
+  const std::string req =
+      "GET /validate-ws-in-headers HTTP/1.1\r\n"
+      "foo: \t \v bar \e\t \r\n"
+      "Connection: close\r\n"
+      "\r\n";
+
+  ASSERT_TRUE(send_request(5, req));
+  svr.stop();
+  t.join();
+  EXPECT_EQ(header_value, "\v bar \e");
+}
+
+TEST(ServerRequestParsingTest, ReadHeadersRegexComplexity) {
+  Server svr;
+  svr.Get("/hi",
+          [&](const Request & /*req*/, Response &res) {
+            res.set_content("ok", "text/plain");
+          });
+
+  // Server read timeout must be longer than the client read timeout for the
+  // bug to reproduce, probably to force the server to process a request
+  // without a trailing blank line.
+  const time_t client_read_timeout_sec = 1;
+  svr.set_read_timeout(client_read_timeout_sec + 1, 0);
+  bool listen_thread_ok = false;
+  thread t = thread([&] { listen_thread_ok = svr.listen(HOST, PORT); });
+  while (!svr.is_running()) {
+    msleep(1);
+  }
+
+  // A certain header line causes an exception if the header property is parsed
+  // naively with a single regex. This occurs with libc++ but not libstdc++.
+  const std::string req =
+      "GET /hi HTTP/1.1\r\n"
+      " :                                                                      "
+      "                                                                       ";
+
+  ASSERT_TRUE(send_request(client_read_timeout_sec, req));
+  svr.stop();
+  t.join();
+  EXPECT_TRUE(listen_thread_ok);
+}
 
 class ServerTestWithAI_PASSIVE : public ::testing::Test {
 protected:
